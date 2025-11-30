@@ -1,6 +1,6 @@
 /**
  * Supabase REST API 客户端
- * 修复了字段名映射 (group -> group_name) 和时间格式问题
+ * 修复版：移除 created_at 发送，让数据库自动生成
  */
 
 // 优先从环境变量获取，如果没有则使用默认值
@@ -33,6 +33,8 @@ export async function getTools() {
 
     if (!response.ok) {
       if (response.status === 406 || response.status === 404) return [];
+      const errorText = await response.text();
+      console.error(`Get Tools Error (${response.status}):`, errorText);
       throw new Error(`获取工具失败: ${response.status}`);
     }
 
@@ -40,7 +42,7 @@ export async function getTools() {
     return tools.map((tool: any) => ({
       id: tool.id,
       name: tool.name,
-      // 映射回前端使用的 'group'
+      // 兼容旧数据 group 和新数据 group_name
       group: tool.group_name || tool.group || '未分组',
       description: tool.description || '',
       posterUrl: tool.poster_url,
@@ -56,16 +58,14 @@ export async function getTools() {
 // 添加工具
 export async function addTool(toolData: any) {
   try {
-    // 构造符合数据库 Schema 的 Payload
+    // 构造 Payload
+    // 关键修复：不发送 created_at，让数据库默认值处理
     const payload = {
       name: toolData.name,
-      // 关键修复：映射到数据库的 group_name 字段
       group_name: toolData.group, 
       description: toolData.description,
       poster_url: toolData.posterUrl,
-      model_url: toolData.modelUrl,
-      // 关键修复：发送 ISO 格式字符串，而不是数字
-      created_at: new Date().toISOString()
+      model_url: toolData.modelUrl
     };
 
     const response = await fetch(`${REST_API_URL}/${TOOL_TABLE}`, {
@@ -76,18 +76,29 @@ export async function addTool(toolData: any) {
 
     if (!response.ok) {
       const errorText = await response.text();
-      // 在控制台打印详细错误，帮助调试
       console.error('Supabase Insert Error:', errorText);
-      throw new Error(`Server responded with ${response.status}: ${errorText}`);
+      // 尝试解析详细错误信息
+      try {
+        const errorJson = JSON.parse(errorText);
+        throw new Error(`添加失败: ${errorJson.message || errorJson.error || response.status}`);
+      } catch (e) {
+        throw new Error(`添加失败 (${response.status}): ${errorText}`);
+      }
     }
 
     const result = await response.json();
+    
+    // 确保返回了数据
+    if (!result || result.length === 0) {
+      throw new Error('服务器未返回数据，但操作可能已成功');
+    }
+
     const newTool = result[0];
     
     return {
       id: newTool.id,
       name: newTool.name,
-      group: newTool.group_name,
+      group: newTool.group_name, // 注意这里接收的是 group_name
       description: newTool.description,
       posterUrl: newTool.poster_url,
       modelUrl: newTool.model_url,
@@ -105,7 +116,6 @@ export async function updateTool(id: string, updates: any) {
     const payload: any = {};
     
     if (updates.name !== undefined) payload['name'] = updates.name;
-    // 映射 group -> group_name
     if (updates.group !== undefined) payload['group_name'] = updates.group;
     if (updates.description !== undefined) payload['description'] = updates.description;
     if (updates.posterUrl !== undefined) payload['poster_url'] = updates.posterUrl;
@@ -117,7 +127,11 @@ export async function updateTool(id: string, updates: any) {
       body: JSON.stringify(payload)
     });
 
-    if (!response.ok) throw new Error(`更新失败: ${response.status}`);
+    if (!response.ok) {
+        const errorText = await response.text();
+        console.error('Update Error:', errorText);
+        throw new Error(`更新失败: ${response.status}`);
+    }
 
     const result = await response.json();
     const updatedTool = result[0];
@@ -156,7 +170,6 @@ export async function deleteTool(id: string) {
 // 重命名分组
 export async function renameGroup(oldName: string, newName: string) {
   try {
-    // 注意查询参数也要用 group_name
     const response = await fetch(`${REST_API_URL}/${TOOL_TABLE}?group_name=eq.${oldName}`, {
       method: 'PATCH',
       headers: { ...HEADERS, 'Prefer': 'return=minimal' },
